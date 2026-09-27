@@ -31,12 +31,22 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>待补字段</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">
+            <a v-if="column === '供电编号'" class="link" href="javascript:void 0" @click="openDetail(row)">
+              {{ row[column] ?? '—' }}
+            </a>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
+          <td>
+            <span v-if="missingOf(row).length" class="error-text">缺：{{ missingOf(row).join('、') }}</span>
+            <span v-else>—</span>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -50,13 +60,14 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无供电保障数据，可先登记供电单元</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无供电保障数据，可先登记供电单元</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
       <span>共 {{ total }} 条供电保障记录</span>
+      <span v-if="infoMessage" class="info-text">{{ infoMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -64,22 +75,32 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 
-import { request } from '@/api/client'
+import { fetchJson, request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, unknown> & { id?: number }
 
 const ENDPOINT = '/api/power'
 const columns = ["供电编号", "所属站点", "供电方式", "蓄电池容量", "上次放电测试", "备电时长", "责任人员", "供电状态"]
 const actions = ["安排巡检", "确认正常", "标记断电"]
-const statuses = ["待巡检", "供电正常", "备电不足", "已断电"]
-const stats = [{"label": "在册供电单元", "value": 0}, {"label": "备电不足", "value": 0}, {"label": "已断电站点", "value": 0}]
 
+const router = useRouter()
 const rows = ref<Row[]>([])
 const total = ref(0)
+const stats = ref<{ label: string; value: number }[]>([])
 const errorMessage = ref('')
+const infoMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+function missingOf(row: Row): string[] {
+  return Array.isArray(row.missing_fields) ? (row.missing_fields as string[]) : []
+}
+
+function openDetail(row: Row) {
+  void router.push(`/power/${row.id}`)
+}
 
 function resetFilters() {
   filters.value = {}
@@ -96,14 +117,17 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  infoMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('供电保障动作未生效，请稍后重试')
+    const payload = (await response.json()) as { ok: boolean; message?: string }
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || '供电保障动作未生效，请稍后重试')
     }
+    infoMessage.value = payload.message || ''
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '供电保障操作失败'
@@ -114,13 +138,13 @@ async function reload() {
   errorMessage.value = ''
   const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
-    if (!response.ok) {
-      throw new Error('供电单元列表读取失败')
-    }
-    const payload = await response.json()
+    const [payload, statPayload] = await Promise.all([
+      fetchJson<{ items?: Row[]; total?: number }>(`${ENDPOINT}?${query}`),
+      fetchJson<{ items?: { label: string; value: number }[] }>(`${ENDPOINT}/stats`),
+    ])
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    stats.value = statPayload.items ?? []
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '供电保障列表读取失败'
   }
