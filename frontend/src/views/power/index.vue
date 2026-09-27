@@ -19,9 +19,16 @@
     </div>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label class="filter-item">
+        <span>供电编号</span>
+        <input v-model="keyword" placeholder="按供电编号检索" />
+      </label>
+      <label class="filter-item">
+        <span>供电状态</span>
+        <select v-model="statusFilter">
+          <option value="">全部状态</option>
+          <option v-for="status in statuses" :key="status" :value="status">{{ status }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -43,10 +50,12 @@
               :key="action"
               class="link"
               type="button"
+              :disabled="actionBusy"
               @click="runAction(action, row)"
             >
               {{ action }}
             </button>
+            <RouterLink class="link" :to="`/power/${row.id}`">详情</RouterLink>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -57,6 +66,7 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条供电保障记录</span>
+      <span v-if="noticeMessage" class="notice-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -72,17 +82,20 @@ type Row = Record<string, string | number | null>
 const ENDPOINT = '/api/power'
 const columns = ["供电编号", "所属站点", "供电方式", "蓄电池容量", "上次放电测试", "备电时长", "责任人员", "供电状态"]
 const actions = ["安排巡检", "确认正常", "标记断电"]
-const statuses = ["待巡检", "供电正常", "备电不足", "已断电"]
-const stats = [{"label": "在册供电单元", "value": 0}, {"label": "备电不足", "value": 0}, {"label": "已断电站点", "value": 0}]
+const statuses = ["待巡检", "巡检中", "供电正常", "备电不足", "已断电"]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const stats = ref([{ label: "在册供电单元", value: 0 }, { label: "备电不足", value: 0 }, { label: "已断电站点", value: 0 }])
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const noticeMessage = ref('')
+const keyword = ref('')
+const statusFilter = ref('')
+const actionBusy = ref(false)
 
 function resetFilters() {
-  filters.value = {}
+  keyword.value = ''
+  statusFilter.value = ''
   void reload()
 }
 
@@ -95,32 +108,48 @@ function openCreate() {
 }
 
 async function runAction(action: string, row: Row) {
+  if (actionBusy.value) return
+  actionBusy.value = true
   errorMessage.value = ''
+  noticeMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('供电保障动作未生效，请稍后重试')
+    const result = await response.json()
+    if (!response.ok || !result.ok) {
+      throw new Error(result.message ?? '供电保障动作未生效，请稍后重试')
     }
+    noticeMessage.value = result.message ?? `供电单元已${action}`
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '供电保障操作失败'
+  } finally {
+    actionBusy.value = false
   }
 }
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = new URLSearchParams()
+  if (keyword.value) query.set('keyword', keyword.value)
+  if (statusFilter.value) query.set('status', statusFilter.value)
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
-    if (!response.ok) {
+    const [listResponse, statsResponse] = await Promise.all([
+      request(`${ENDPOINT}?${query}`),
+      request(`${ENDPOINT}/stats`),
+    ])
+    if (!listResponse.ok) {
       throw new Error('供电单元列表读取失败')
     }
-    const payload = await response.json()
+    const payload = await listResponse.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    if (statsResponse.ok) {
+      const summary = await statsResponse.json()
+      stats.value = stats.value.map((item) => ({ ...item, value: summary[item.label] ?? 0 }))
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '供电保障列表读取失败'
   }
